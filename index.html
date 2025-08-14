@@ -3,18 +3,19 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Interactive SVG Map – Follow Popover, Clickable Everything</title>
+<title>Interactive SVG Map — Zoom Floor + Full Features</title>
 <style>
   :root{
-    --bg:#0b0f14; --panel:#0f1621; --ink:#e9eef6; --sub:#a9b4c4; --muted:#223043;
+    --bg:#0b0f14; --panel:#0f1621; --ink:#e9eef6; --sub:#a9b4c4;
     --res:#60a5fa; --ret:#fbbf24; --off:#a78bfa; --ind:#f97316; --hos:#f472b6;
     --edu:#22c55e; --hlth:#ef4444; --rec:#2dd4bf; --mix:#c084fc; --infra:#94a3b8;
+    --stroke:#18202b; --muted:#223043;
   }
   *{box-sizing:border-box}
   body{margin:0;font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial;color:var(--ink);background:#0b0f14}
 
   .wrap{max-width:1200px;margin:0 auto}
-  .topbar{position:sticky;top:0;z-index:10;background:#0f1621;border-bottom:1px solid #18202b}
+  .topbar{position:sticky;top:0;z-index:10;background:#0f1621;border-bottom:1px solid var(--stroke)}
   .topbar-inner{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px}
   .btn{background:#111827;border:1px solid #1f2a38;color:#cfe3ff;padding:6px 10px;border-radius:10px;cursor:pointer}
   .btn:hover{border-color:#2a3a52}
@@ -27,10 +28,14 @@
   .chip input:checked + .dot{outline:2px solid #ffffff66;outline-offset:2px}
 
   .layout{display:grid;grid-template-columns:260px 1fr;gap:14px;padding:14px}
-  .panel{background:#0f1621;border:1px solid #18202b;border-radius:14px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,.28)}
+  .panel{background:#0f1621;border:1px solid var(--stroke);border-radius:14px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,.28)}
   .sidebar .title{margin:0 0 8px;font-size:16px}
   .list{list-style:none;padding:0;margin:0;display:grid;gap:6px}
-  .list .btn{width:100%;text-align:left}
+  .list .btn{width:100%;text-align:left;display:flex;justify-content:space-between;align-items:center}
+  .small-badge{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid #203049;background:#0d1520;color:#bcd0ea}
+  .node-has-matches{border-color:#2b3b54;background:#0d1726}
+  .node-has-matches .small-badge{display:inline-block}
+  .small-badge.hidden{display:none}
 
   .mapWrap{position:relative}
   svg{width:100%;height:auto;display:block;background:#0a121b;border-radius:12px;border:1px solid #17212f;touch-action:none}
@@ -47,9 +52,11 @@
   .popover{position:fixed;max-width:360px;background:#0d1420;border:1px solid #223043;padding:12px;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.45);z-index:5}
   .hidden{display:none}
 
-  /* sidebar filter highlighting */
   .btn.match { font-weight:700; border-color:transparent; }
   .btn.dim { opacity:.45; }
+
+  .ov-parcel, .ov-parcel * { pointer-events:none !important; }
+  .disabled { pointer-events:none !important; }
 
   .c-Residential{fill:var(--res)} .c-Retail{fill:var(--ret)} .c-Office{fill:var(--off)}
   .c-Industrial{fill:var(--ind)} .c-Hospitality{fill:var(--hos)} .c-Educational{fill:var(--edu)}
@@ -73,9 +80,9 @@
 
   <div class="layout">
     <aside class="panel sidebar">
-      <h3 class="title">Nodes</h3>
+      <h3 id="nodesTitle" class="title">Nodes</h3>
       <ul id="nodeList" class="list"></ul>
-      <div style="height:1px;background:linear-gradient(90deg,transparent,#223043,transparent);margin:12px 0"></div>
+      <div id="nodesDivider" style="height:1px;background:linear-gradient(90deg,transparent,#223043,transparent);margin:12px 0"></div>
       <h3 class="title">Parcels</h3>
       <ul id="parcelList" class="list"></ul>
     </aside>
@@ -156,6 +163,9 @@ const counter = document.getElementById('counter');
 const summaryBottom = document.getElementById('summaryBottom');
 const nodeTitle = document.getElementById('nodeTitle');
 
+const nodesTitle = document.getElementById('nodesTitle');
+const nodesDivider = document.getElementById('nodesDivider');
+
 const backBtn = document.getElementById('backBtn');
 const zoomInBtn = document.getElementById('zoomInBtn');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
@@ -165,7 +175,13 @@ const clearType = document.getElementById('clearType');
 
 let currentNode = null;
 let currentType = null;
-let t = {x:0,y:0,scale:1};
+
+/* ---------------------------- Transform state ----------------------------- */
+let t = {x:0,y:0,scale:1};               // current
+let base = {x:0,y:0,scale:1};            // minimum zoom-out (reset floor)
+
+function setBaseTransform(tf){ base = {...tf}; }
+function applyTransform(){ stage.setAttribute('transform', `translate(${t.x},${t.y}) scale(${t.scale})`); }
 
 /* ------------------------------- Legend UI -------------------------------- */
 Object.entries(TYPE_COLORS).forEach(([label,color])=>{
@@ -188,12 +204,16 @@ function centroid(pathD){
   const bb = p.getBBox(); p.remove();
   return {x: bb.x + bb.width/2, y: bb.y + bb.height/2};
 }
+function pathBBox(pathD){
+  const p = elem('path',{d:pathD}); stage.appendChild(p);
+  const bb = p.getBBox(); p.remove();
+  return bb;
+}
 function svgToClient(x,y){
   const pt = map.createSVGPoint(); pt.x=x; pt.y=y;
   const screen = pt.matrixTransform(stage.getCTM()).matrixTransform(map.getScreenCTM());
   return {x:screen.x, y:screen.y};
 }
-function clamp(v,min,max){ return Math.max(min, Math.min(max,v)); }
 function unionBBox(bbs){
   const xs=bbs.map(b=>b.x), ys=bbs.map(b=>b.y), x2s=bbs.map(b=>b.x+b.width), y2s=bbs.map(b=>b.y+b.height);
   const x=Math.min(...xs), y=Math.min(...ys), x2=Math.max(...x2s), y2=Math.max(...y2s);
@@ -213,25 +233,8 @@ function showTooltipAt(x,y,html){
 }
 function hideTooltip(){ tooltip.classList.add('hidden'); }
 
-function showPopoverAt(x,y,html){
-  popover.innerHTML = html;
-  popover.classList.remove('hidden');
-  const r = popover.getBoundingClientRect();
-  let left = x + 12, top = y + 12, m = 8;
-  if(left + r.width > innerWidth - m) left = innerWidth - r.width - m;
-  if(top + r.height > innerHeight - m) top = innerHeight - r.height - m;
-  if(left < m) left = m; if(top < m) top = m;
-  popover.style.left = left + 'px';
-  popover.style.top = top + 'px';
-}
-function hidePopover(){ popover.classList.add('hidden'); }
-
-/* ---- Popover follow helpers (for animating while map centers on parcel) --- */
 let activePopover = { followEl: null };
-function setPopoverContent(html){
-  popover.innerHTML = html;
-  popover.classList.remove('hidden');
-}
+function setPopoverContent(html){ popover.innerHTML = html; popover.classList.remove('hidden'); }
 function positionPopoverAtClient(x, y){
   const r = popover.getBoundingClientRect();
   let left = x + 12, top = y + 12, m = 8;
@@ -243,26 +246,22 @@ function positionPopoverAtClient(x, y){
 }
 function positionPopoverForElement(el, anchor = 'top-center'){
   const bb = el.getBBox();
-  let ax = bb.x + bb.width/2;
-  let ay = (anchor === 'top-center') ? bb.y : (bb.y + bb.height/2);
+  const ax = bb.x + bb.width/2;
+  const ay = (anchor === 'top-center') ? bb.y : (bb.y + bb.height/2);
   const pt = svgToClient(ax, ay);
   positionPopoverAtClient(pt.x, pt.y);
 }
 function startPopoverFollow(el){ activePopover.followEl = el; }
 function stopPopoverFollow(){ activePopover.followEl = null; }
-
-window.addEventListener('pointerdown', e=>{
-  if(!popover.contains(e.target)) hidePopover();
-});
+window.addEventListener('pointerdown', e=>{ if(!popover.contains(e.target)) popover.classList.add('hidden'); });
 
 /* ------------------------------ Zoom & Pan -------------------------------- */
-function applyTransform(){ stage.setAttribute('transform', `translate(${t.x},${t.y}) scale(${t.scale})`); }
 function animateTo(target, ms = 280, onUpdate = null, onDone = null){
   const start = {...t}; const dtX = target.x - start.x, dtY = target.y - start.y, dtS = target.scale - start.scale;
   const t0 = performance.now();
   function step(now){
     const p = Math.min(Math.max((now - t0)/ms, 0), 1);
-    const ease = p < .5 ? 2*p*p : 1 - Math.pow(-2*p+2,2)/2; // easeInOutQuad
+    const ease = p < .5 ? 2*p*p : 1 - Math.pow(-2*p+2,2)/2;
     t = { x: start.x + dtX*ease, y: start.y + dtY*ease, scale: start.scale + dtS*ease };
     applyTransform();
     if (onUpdate) onUpdate(ease);
@@ -271,62 +270,109 @@ function animateTo(target, ms = 280, onUpdate = null, onDone = null){
   }
   requestAnimationFrame(step);
 }
-function zoomToBBox(bb, padding = 24, followEl = null){
+
+function computeFitTransform(bb, padding = 24){
   const svgW=1200, svgH=720;
   const scale = Math.min(svgW/(bb.width+padding*2), svgH/(bb.height+padding*2));
   const cx = bb.x + bb.width/2, cy = bb.y + bb.height/2;
-  const tx = svgW/2 - scale*cx, ty = svgH/2 - scale*cy;
+  const x = svgW/2 - scale*cx, y = svgH/2 - scale*cy;
+  return {x,y,scale};
+}
+
+function zoomToBBox(bb, padding = 24, followEl = null, setAsBase = false){
+  const target = computeFitTransform(bb, padding);
 
   if (followEl) startPopoverFollow(followEl);
-
-  animateTo({x:tx,y:ty,scale}, 320,
+  animateTo(target, 320,
     () => { if (activePopover.followEl) positionPopoverForElement(activePopover.followEl, 'top-center'); },
     () => { stopPopoverFollow(); }
   );
+
+  if (setAsBase) setBaseTransform(target);
 }
+
 function zoomBy(factor, centerX=600, centerY=360){
-  const newScale = Math.max(0.4, Math.min(12, t.scale*factor));
+  // proposed scale
+  let newScale = Math.max(base.scale, Math.min(12, t.scale*factor));
+  // If trying to go below base, snap to base transform exactly
+  if (newScale === base.scale && factor < 1){
+    t = {...base};
+    applyTransform();
+    return;
+  }
+  // normal zoom around pointer (with floor)
   t.x = centerX - (centerX - t.x) * (newScale / t.scale);
   t.y = centerY - (centerY - t.y) * (newScale / t.scale);
-  t.scale = newScale; applyTransform();
+  t.scale = newScale; 
+  applyTransform();
 }
+
+/* --------- Smart fit helpers (initial / Reset / Back) --------------------- */
+function fitOverview(setBase=true){
+  const bbs = NODES.map(n => pathBBox(n.path));
+  const bb = unionBBox(bbs);
+  zoomToBBox(bb, 36, null, setBase);  // setAsBase true on initial/back/reset
+}
+function fitCurrentNode(setBase=true){
+  const list = PARCELS[currentNode] || [];
+  if (!list.length){
+    const target = {x:0,y:0,scale:1};
+    animateTo(target); 
+    if (setBase) setBaseTransform(target);
+    return;
+  }
+  const bbs = list.map(p => pathBBox(p.path));
+  const bb = unionBBox(bbs);
+  zoomToBBox(bb, 36, null, setBase);  // setAsBase true on enter/reset
+}
+
 zoomInBtn.addEventListener('click', ()=>zoomBy(1.25));
 zoomOutBtn.addEventListener('click', ()=>zoomBy(0.8));
-resetBtn.addEventListener('click', ()=>animateTo({x:0,y:0,scale:1}));
+resetBtn.addEventListener('click', ()=>{
+  tooltip.classList.add('hidden'); popover.classList.add('hidden'); stopPopoverFollow();
+  if (currentNode) fitCurrentNode(true); else fitOverview(true); // reset sets base
+});
 
-// Wheel zoom (pointer-centered)
+// Wheel zoom (pointer-centered with floor)
 map.addEventListener('wheel', (e)=>{
   e.preventDefault();
   const rect = map.getBoundingClientRect();
-  const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
-  zoomBy(e.deltaY<0?1.1:0.9, cx, cy);
+  zoomBy(e.deltaY<0?1.1:0.9, e.clientX - rect.left, e.clientY - rect.top);
 }, {passive:false});
 
-// ---------- Pan only when clicking the BACKGROUND ----------
-let dragging=false, last={x:0,y:0};
+// Drag & Pan with threshold
+const PAN_THRESHOLD = 6;
+let pan = {tracking:false, panning:false, id:null, startX:0, startY:0, lastX:0, lastY:0};
+let justDragged = false;
+
 map.addEventListener('pointerdown', (e)=>{
+  pan.tracking = true; pan.panning = false;
+  pan.id = e.pointerId; pan.startX = pan.lastX = e.clientX; pan.startY = pan.lastY = e.clientY;
   const isBackground = (e.target === map || e.target.tagName === 'rect');
-  if(!isBackground) return;              // let node/parcel clicks work!
-  dragging=true;
-  last={x:e.clientX, y:e.clientY};
-  map.setPointerCapture(e.pointerId);
+  if (isBackground){ pan.panning = true; map.setPointerCapture(pan.id); }
 });
 map.addEventListener('pointermove', (e)=>{
-  if(!dragging) return;
-  const dx = e.clientX - last.x, dy = e.clientY - last.y;
-  last = {x:e.clientX, y:e.clientY};
+  if(!pan.tracking) return;
+  if(!pan.panning){
+    const dx0 = e.clientX - pan.startX, dy0 = e.clientY - pan.startY;
+    if(Math.hypot(dx0,dy0) >= PAN_THRESHOLD){ pan.panning = true; justDragged = true; map.setPointerCapture(pan.id); }
+    else return;
+  }
+  const dx = e.clientX - pan.lastX, dy = e.clientY - pan.lastY;
+  pan.lastX = e.clientX; pan.lastY = e.clientY;
   t.x += dx; t.y += dy; applyTransform();
 });
-map.addEventListener('pointerup', (e)=>{
-  if(dragging) map.releasePointerCapture(e.pointerId);
-  dragging=false;
+map.addEventListener('pointerup', ()=>{
+  if(pan.panning) map.releasePointerCapture(pan.id);
+  pan = {tracking:false, panning:false, id:null, startX:0, startY:0, lastX:0, lastY:0};
+  if(justDragged) setTimeout(()=>{ justDragged=false; }, 0);
 });
 
 /* ------------------------------- Rendering -------------------------------- */
 function labelTopCenterClient(pathD){
   const p = elem('path',{d:pathD}); stage.appendChild(p);
   const bb = p.getBBox(); p.remove();
-  return svgToClient(bb.x+bb.width/2, bb.y); // top-center
+  return svgToClient(bb.x+bb.width/2, bb.y);
 }
 
 function drawNodes(){
@@ -334,14 +380,12 @@ function drawNodes(){
   NODES.forEach(n=>{
     const g = elem('g',{class:'nodeGroup'});
     const path = elem('path',{d:n.path,class:'node',tabindex:0});
-    // hover (mouse position) + CLICK to enter detail
     path.addEventListener('pointermove', e=>{
       const extra = currentType ? `<br><small>${countTypeInNode(n.id,currentType)} ${currentType} available</small>` : '';
       showTooltipAt(e.clientX, e.clientY, `<b>${n.name}</b><br><small>Area: ${n.info.area} ha • Parcels: ${n.info.parcels}</small>${extra}`);
     });
-    path.addEventListener('pointerleave', hideTooltip);
-    path.addEventListener('click', ()=>enterNode(n.id));   // CLICK
-
+    path.addEventListener('pointerleave', ()=>tooltip.classList.add('hidden'));
+    path.addEventListener('click', ()=>{ if(!justDragged) enterNode(n.id); });
     g.appendChild(path);
 
     const c = centroid(n.path);
@@ -351,8 +395,8 @@ function drawNodes(){
       const extra = currentType ? `<br><small>${countTypeInNode(n.id,currentType)} ${currentType} available</small>` : '';
       showTooltipAt(pt.x, pt.y, `<b>${n.name}</b><br><small>Area: ${n.info.area} ha • Parcels: ${n.info.parcels}</small>${extra}`);
     });
-    label.addEventListener('pointerleave', hideTooltip);
-    label.addEventListener('click', ()=>enterNode(n.id));  // CLICK
+    label.addEventListener('pointerleave', ()=>tooltip.classList.add('hidden'));
+    label.addEventListener('click', ()=>{ if(!justDragged) enterNode(n.id); });
     g.appendChild(label);
 
     nodeLayer.appendChild(g);
@@ -364,12 +408,8 @@ function drawParcelsOverview(){
   if(!currentType) return;
   Object.entries(PARCELS).forEach(([nodeId,list])=>{
     list.filter(p=>p.type===currentType).forEach(p=>{
-      const path = elem('path',{d:p.path,class:`parcel ${TYPE_CLASS[p.type]}`});
+      const path = elem('path',{d:p.path,class:`parcel ov-parcel ${TYPE_CLASS[p.type]}`});
       path.setAttribute('fill-opacity','0.75');
-      path.addEventListener('pointermove', e=>{
-        showTooltipAt(e.clientX, e.clientY, `<b>Parcel ${p.id} (${nodeId.toUpperCase()})</b><br><small>${p.type} • ${p.area.toFixed(1)} ha</small>`);
-      });
-      path.addEventListener('pointerleave', hideTooltip);
       parcelLayer.appendChild(path);
     });
   });
@@ -378,9 +418,18 @@ function drawParcelsOverview(){
 /* ------------------------------- Sidebar ---------------------------------- */
 function buildNodeList(){
   nodeList.innerHTML='';
+
+  if (NODES.length > 1){
+    const li0 = document.createElement('li');
+    const btn0 = document.createElement('button'); btn0.className='btn'; btn0.textContent='Overview (All Nodes)';
+    btn0.addEventListener('click', ()=>exitToOverview());
+    li0.appendChild(btn0); nodeList.appendChild(li0);
+  }
+
   NODES.forEach(n=>{
     const li = document.createElement('li');
-    const btn = document.createElement('button'); btn.className='btn'; btn.textContent=n.name;
+    const btn = document.createElement('button'); btn.className='btn node-btn'; btn.dataset.nodeId = n.id;
+    btn.innerHTML = `<span>${n.name}</span><span class="small-badge hidden">0</span>`;
     btn.addEventListener('mouseenter', ()=>{
       const pt = labelTopCenterClient(n.path);
       const extra = currentType ? `<br><small>${countTypeInNode(n.id,currentType)} ${currentType} available</small>` : '';
@@ -389,10 +438,12 @@ function buildNodeList(){
       const nodePath = [...nodeLayer.querySelectorAll('path')].find(p=>p.getAttribute('d')===n.path);
       if(nodePath) nodePath.classList.add('is-hot');
     });
-    btn.addEventListener('mouseleave', ()=>{ hideTooltip(); nodeLayer.querySelectorAll('path').forEach(p=>p.classList.remove('is-hot')); });
-    btn.addEventListener('click', ()=>enterNode(n.id)); // sidebar click → detail
+    btn.addEventListener('mouseleave', ()=>{ tooltip.classList.add('hidden'); nodeLayer.querySelectorAll('path').forEach(p=>p.classList.remove('is-hot')); });
+    btn.addEventListener('click', ()=>enterNode(n.id));
     li.appendChild(btn); nodeList.appendChild(li);
   });
+
+  updateNodeListHighlight();
 }
 
 function buildParcelList(){
@@ -408,7 +459,6 @@ function buildParcelList(){
     btn.style.textAlign='left';
     btn.textContent = `Parcel ${p.id} — ${p.type}`;
 
-    // Highlight matches (filter + Available)
     const isMatch = !!currentType && p.type === currentType && (p.status || '').toLowerCase() === 'available';
     if (currentType) {
       if (isMatch) {
@@ -418,10 +468,6 @@ function buildParcelList(){
       } else {
         btn.classList.add('dim');
       }
-    } else {
-      btn.classList.remove('match','dim');
-      btn.style.background = '';
-      btn.style.color = '';
     }
 
     btn.addEventListener('mouseenter', ()=>{
@@ -429,13 +475,14 @@ function buildParcelList(){
       const pt = svgToClient(bb.x+bb.width/2, bb.y);
       showTooltipAt(pt.x, pt.y, `<b>Parcel ${p.id}</b><br><small>${p.type} • ${p.area.toFixed(1)} ha</small>`);
     });
-    btn.addEventListener('mouseleave', hideTooltip);
+    btn.addEventListener('mouseleave', ()=>tooltip.classList.add('hidden'));
 
     btn.addEventListener('click', ()=>{
       const el = [...parcelLayer.querySelectorAll('path')].find(q => q.getAttribute('d') === p.path);
       if(el){
-        openParcelPanel({ currentTarget: el }, p, currentNode); // show instantly
-        zoomToBBox(el.getBBox(), 24, el);                      // follow while centering
+        openParcelPanel({ currentTarget: el }, p, currentNode);
+        const bb = el.getBBox();
+        zoomToBBox(bb, 24, el); // follow; base unchanged (detail zoom)
       }
     });
 
@@ -448,15 +495,31 @@ function buildParcelList(){
 function countTypeInNode(nodeId, type){
   return (PARCELS[nodeId]||[]).filter(p=>p.type===type).length;
 }
+
+function updateNodeListHighlight(){
+  const items = nodeList.querySelectorAll('.node-btn');
+  items.forEach(btn=>{
+    const id = btn.dataset.nodeId;
+    const badge = btn.querySelector('.small-badge');
+    if(!currentType){
+      btn.classList.remove('node-has-matches'); badge.classList.add('hidden'); badge.textContent='0';
+      return;
+    }
+    const n = countTypeInNode(id, currentType);
+    if(n>0){ btn.classList.add('node-has-matches'); badge.classList.remove('hidden'); badge.textContent = n; }
+    else { btn.classList.remove('node-has-matches'); badge.classList.add('hidden'); badge.textContent='0'; }
+  });
+}
+
 function setType(tLabel){
   currentType = tLabel;
   statusEl.textContent = tLabel ? `Filtering: ${tLabel}` : 'No filter';
   updateSummary();
   redraw();
-  buildParcelList(); // refresh list colors if already in node view
+  buildParcelList();
+  updateNodeListHighlight();
 }
 
-// Open parcel detail popover (follow while animating)
 function openParcelPanel(evt, p, nodeId){
   const el = evt.currentTarget;
   setPopoverContent(`
@@ -470,66 +533,80 @@ function openParcelPanel(evt, p, nodeId){
       <button class="btn">View Development Potential</button>
     </div>
   `);
-  positionPopoverForElement(el, 'top-center'); // show now at current pos
-  startPopoverFollow(el);                      // start following (zoomToBBox keeps updating)
+  positionPopoverForElement(el, 'top-center');
+  startPopoverFollow(el);
 }
 
 function enterNode(id){
   currentNode = id;
-  hideTooltip(); hidePopover(); stopPopoverFollow();
+  updateBackState(); tooltip.classList.add('hidden'); popover.classList.add('hidden'); stopPopoverFollow();
 
-  nodeLayer.innerHTML='';  // hide 5 nodes in detail view
+  nodeLayer.innerHTML='';
   nodeTitle.classList.remove('hidden');
   nodeTitle.textContent = `${NODES.find(n=>n.id===id).name} — Parcels`;
 
   parcelLayer.innerHTML='';
   const list = PARCELS[id]||[];
   list.forEach(p=>{
+    const isMatch = !currentType || p.type === currentType;
     const path = elem('path',{d:p.path,class:`parcel ${TYPE_CLASS[p.type]}`});
-    path.style.opacity = currentType && p.type!==currentType ? .15 : .95;
+    path.style.opacity = isMatch ? .95 : .18;
 
-    path.addEventListener('pointermove', e=>{
-      showTooltipAt(e.clientX, e.clientY, `<b>Parcel ${p.id}</b><br><small>${p.type} • ${p.area.toFixed(1)} ha</small>`);
-    });
-    path.addEventListener('pointerleave', hideTooltip);
-
-    path.addEventListener('click', e=>{
-      e.stopPropagation();
-      openParcelPanel(e, p, id);                // show instantly
-      zoomToBBox(path.getBBox(), 24, path);     // then follow while centering
-    });
-
+    if (!isMatch) {
+      path.classList.add('disabled');
+    } else {
+      path.addEventListener('pointermove', e=>{
+        showTooltipAt(e.clientX, e.clientY, `<b>Parcel ${p.id}</b><br><small>${p.type} • ${p.area.toFixed(1)} ha</small>`);
+      });
+      path.addEventListener('pointerleave', ()=>tooltip.classList.add('hidden'));
+      path.addEventListener('click', e=>{
+        if(justDragged) return;
+        e.stopPropagation();
+        openParcelPanel(e, p, id);
+        zoomToBBox(path.getBBox(), 24, path); // detail zoom; base unchanged
+      });
+    }
     parcelLayer.appendChild(path);
   });
 
   buildParcelList();
-
-  // Fit & center node (union of its parcels)
-  if (list.length){
-    const tmp = list.map(p=>{ const el = elem('path',{d:p.path}); stage.appendChild(el); const bb = el.getBBox(); el.remove(); return bb; });
-    const u = unionBBox(tmp);
-    zoomToBBox(u, 36);
-  } else {
-    animateTo({x:0,y:0,scale:1});
-  }
-
+  fitCurrentNode(true);           // <- fit and set base to node
   summaryBottom.classList.add('hidden');
+  updateNodeListHighlight();
 }
-backBtn.addEventListener('click', ()=>{
-  currentNode = null; hideTooltip(); hidePopover(); stopPopoverFollow();
+
+function exitToOverview(){
+  currentNode = null;
+  updateBackState(); tooltip.classList.add('hidden'); popover.classList.add('hidden'); stopPopoverFollow();
+
   nodeTitle.classList.add('hidden');
   parcelLayer.innerHTML='';
-  drawNodes(); buildParcelList(); updateSummary();
-  animateTo({x:0,y:0,scale:1});
-});
+  drawNodes(); drawParcelsOverview();
+  buildParcelList();
+  updateSummary();
+  fitOverview(true);              // <- fit and set base to overview
+  updateNodeListHighlight();
+}
 
-// Close tooltip/popover when clicking empty map
+backBtn.addEventListener('click', exitToOverview);
+
 map.addEventListener('click', (e)=>{
-  if(e.target === map || e.target.tagName === 'rect'){ hideTooltip(); hidePopover(); stopPopoverFollow(); }
+  if(e.target === map || e.target.tagName === 'rect'){ tooltip.classList.add('hidden'); popover.classList.add('hidden'); stopPopoverFollow(); }
 });
+window.addEventListener('keydown', e=>{ if(e.key==='Escape' && currentNode){ exitToOverview(); } });
 
-// Esc leaves node view
-window.addEventListener('keydown', e=>{ if(e.key==='Escape' && currentNode){ backBtn.click(); } });
+function updateBackState(){
+  const single = NODES.length <= 1;
+  backBtn.disabled = single || !currentNode;
+}
+
+/* ----------------------- Sidebar visibility (single-node) ------------------ */
+function updateSidebarVisibility(){
+  const single = NODES.length <= 1;
+  nodesTitle.style.display = single ? 'none' : '';
+  nodeList.style.display = single ? 'none' : '';
+  nodesDivider.style.display = single ? 'none' : '';
+}
 
 /* --------------------------- Summary & Counter ----------------------------- */
 function getStats(){
@@ -563,12 +640,20 @@ function redraw(){
   if(currentNode) enterNode(currentNode);
   else { drawNodes(); drawParcelsOverview(); }
 }
+
 (function build(){
-  // legend chips built above
   buildNodeList();
-  drawNodes();
-  drawParcelsOverview();
-  updateSummary();
+  updateSidebarVisibility();
+  updateBackState();
+
+  if (NODES.length === 1){
+    enterNode(NODES[0].id);     // single-node mode; base set in fitCurrentNode(true)
+  } else {
+    drawNodes();
+    drawParcelsOverview();
+    updateSummary();
+    fitOverview(true);          // sets base to overview fit at load
+  }
 })();
 </script>
 </body>
